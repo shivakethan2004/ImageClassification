@@ -1,5 +1,7 @@
+You can Clone the repo by runnning : git clone https://github.com/shivakethan2004/ImageClassification.git 
+
 you set up the proj by running 
-> NPM i or npm install
+> npm i or npm install
 
 
 START THE PROJ:
