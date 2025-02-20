@@ -5,7 +5,8 @@ you set up the proj by running
 
 
 START THE PROJ:
-> cd ImageClassification 
-> npm start
+1> cd ImageClassification
+
+2> npm start
 
 
