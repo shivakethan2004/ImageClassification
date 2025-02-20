@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Face Recognition - SSDMobileNetv1</title>
+    <script type="module">
+      import * as faceapi from "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@latest/dist/face-api.esm.js";
+      import { cosineDistance } from "./cal/cosineDistance.js";
+
+      window.faceapi = faceapi;
+      window.cosineDistance = cosineDistance; // Make it globally accessible
+    </script>
+
+    <style>
+      /* Previous styles remain the same */
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        background-color: #f0f0f0;
+        margin: 0;
+        padding: 20px;
+      }
+
+      .upload-container {
+        margin: 20px 0;
+        text-align: center;
+      }
+
+      .file-input {
+        display: none;
+      }
+
+      .upload-button {
+        padding: 10px 20px;
+        background-color: #4caf50;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 16px;
+        transition: background-color 0.3s;
+      }
+
+      .image-container {
+        position: relative;
+        width: 50%;
+        margin: 0 auto;
+        display: none;
+      }
+
+      #inputImage {
+        width: 100%;
+        height: auto;
+        border-radius: 10px;
+        box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.2);
+        display: block;
+      }
+
+      #overlayCanvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
+
+      #modelStatus {
+        margin: 10px 0;
+        padding: 10px;
+        border-radius: 5px;
+        text-align: center;
+      }
+
+      .loading {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: rgba(255, 255, 255, 0.9);
+        padding: 20px;
+        border-radius: 10px;
+        display: none;
+        z-index: 1000;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Face Recognition - SSDMobileNetv1</h1>
+
+    <div id="modelStatus">Loading models...</div>
+
+    <div class="upload-container">
+      <input type="file" id="fileInput" class="file-input" accept="image/*" />
+      <button
+        class="upload-button"
+        onclick="document.getElementById('fileInput').click()"
+      >
+        Upload Image
+      </button>
+    </div>
+
+    <div class="loading" id="loadingIndicator">Processing image...</div>
+
+    <div class="image-container" id="imageContainer">
+      <img id="inputImage" alt="Uploaded Face Image" />
+      <canvas id="overlayCanvas"></canvas>
+    </div>
+<script>
+  // Constants
+const MODEL_URL = "../models/weights";
+const FACE_MATCH_THRESHOLD = 0.55;
+const COSINE_MATCH_THRESHOLD = 0.08;
+
+// DOM Elements
+const elements = {
+  modelStatus: document.getElementById("modelStatus"),
+  uploadButton: document.querySelector(".upload-button"),
+  fileInput: document.getElementById("fileInput"),
+  inputImage: document.getElementById("inputImage"),
+  canvas: document.getElementById("overlayCanvas"),
+  loadingIndicator: document.getElementById("loadingIndicator"),
+  imageContainer: document.getElementById("imageContainer")
+};
+
+// State
+let modelsLoaded = false;
+
+// Model loading
+async function loadModels() {
+  try {
+    updateUIStatus("loading");
+    
+    await Promise.all([
+      faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
+      faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
+      faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+      faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL)
+    ]);
+
+    modelsLoaded = true;
+    updateUIStatus("success");
+    console.log("All models loaded successfully");
+  } catch (error) {
+    console.error("Error loading models:", error);
+    updateUIStatus("error");
+  }
+}
+
+// UI Status Updates
+function updateUIStatus(status) {
+  const statusConfigs = {
+    loading: {
+      backgroundColor: "#fff3cd",
+      color: "#856404",
+      text: "Loading models...",
+      buttonDisabled: true
+    },
+    success: {
+      backgroundColor: "#d4edda",
+      color: "#155724",
+      text: "Models loaded successfully! You can now upload an image.",
+      buttonDisabled: false
+    },
+    error: {
+      backgroundColor: "#f8d7da",
+      color: "#721c24",
+      text: "Error loading models. Please refresh the page.",
+      buttonDisabled: true
+    }
+  };
+
+  const config = statusConfigs[status];
+  Object.assign(elements.modelStatus.style, {
+    backgroundColor: config.backgroundColor,
+    color: config.color
+  });
+  elements.modelStatus.textContent = config.text;
+  elements.uploadButton.disabled = config.buttonDisabled;
+}
+
+// Face Detection
+async function detectFaces() {
+  if (!modelsLoaded) {
+    alert("Face detection models are still loading. Please wait.");
+    return;
+  }
+
+  elements.loadingIndicator.style.display = "block";
+
+  try {
+    await waitForImageLoad();
+    const displaySize = getDisplaySize();
+    setCanvasSize(displaySize);
+
+    const [detections, detectionsWithDescriptors] = await Promise.all([
+      detectFacesWithExpressions(),
+      detectFacesWithDescriptors()
+    ]);
+    console.log(detectionsWithDescriptors) 
+
+    const matches = await findMatches(detectionsWithDescriptors);
+    drawResults(detections, displaySize, matches);
+  } catch (error) {
+    console.error("Error processing image:", error);
+    alert("Error processing image. Please check console for details.");
+  } finally {
+    elements.loadingIndicator.style.display = "none";
+  }
+}
+
+async function waitForImageLoad() {
+  return new Promise((resolve) => {
+    if (elements.inputImage.complete) resolve();
+    else elements.inputImage.onload = resolve;
+  });
+}
+
+function getDisplaySize() {
+  return {
+    width: elements.inputImage.clientWidth,
+    height: elements.inputImage.clientHeight
+  };
+}
+
+function setCanvasSize(displaySize) {
+  elements.canvas.width = displaySize.width;
+  elements.canvas.height = displaySize.height;
+}
+
+async function detectFacesWithExpressions() {
+  return await faceapi
+    .detectAllFaces(elements.inputImage, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3  }))
+    .withFaceLandmarks()
+    .withFaceExpressions();
+}
+
+async function detectFacesWithDescriptors() {
+  return await faceapi
+    .detectAllFaces(elements.inputImage, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3 }))
+    .withFaceLandmarks()
+    .withFaceDescriptors();
+}
+
+async function findMatches(detections) {
+  try {
+    const response = await fetch("http://localhost:3000/faces");
+    if (!response.ok) throw new Error("Network response was not ok");
+    
+    const databaseFaces = await response.json();
+    return await Promise.all(detections.map(detection => 
+      findBestMatch(detection, databaseFaces)
+    ));
+  } catch (error) {
+    console.error("Error fetching faces:", error);
+    return detections.map(() => ({ euclidean: null, cosine: null }));
+  }
+}
+
+async function findBestMatch(detection, databaseFaces) {
+  let bestEuclidean = { distance: Infinity, face: null };
+  let bestCosine = { distance: Infinity, face: null };
+
+  for (const dbFace of databaseFaces) {
+    const storedDescriptor = new Float32Array(Object.values(dbFace.descriptor));
+    
+    const euclideanDistance = await faceapi.euclideanDistance(
+      detection.descriptor,
+      storedDescriptor
+    );
+    const cosineDistance = window.cosineDistance(
+      detection.descriptor,
+      storedDescriptor
+    );
+
+    if (euclideanDistance < FACE_MATCH_THRESHOLD && euclideanDistance < bestEuclidean.distance) {
+      bestEuclidean = { distance: euclideanDistance, face: dbFace };
+    }
+    
+    if (cosineDistance < COSINE_MATCH_THRESHOLD && cosineDistance < bestCosine.distance) {
+      bestCosine = { distance: cosineDistance, face: dbFace };
+    }
+  }
+
+  return {
+    euclidean: bestEuclidean.face,
+    cosine: bestCosine.face
+  };
+}
+
+function drawResults(detections, displaySize, matches) {
+  const resizedDetections = faceapi.resizeResults(detections, displaySize);
+  const context = elements.canvas.getContext("2d");
+  
+  context.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
+  faceapi.draw.drawDetections(elements.canvas, resizedDetections);
+
+  matches.forEach((match, index) => {
+    const detection = resizedDetections[index];
+    const { x, y } = detection.detection.box;
+    
+    context.font = "bold 16px Arial";
+    context.fillStyle = "black";
+    
+    const label = match.euclidean ? 
+      `${match.euclidean.label}` : 
+      "Unknown";
+    
+    context.fillText(`Face ${index + 1}: ${label}`, x, y - 5);
+  });
+}
+
+// File handling
+function handleFileUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    elements.inputImage.src = e.target.result;
+    elements.imageContainer.style.display = "block";
+    elements.inputImage.onload = detectFaces;
+  };
+  reader.readAsDataURL(file);
+}
+
+// Event Listeners
+window.addEventListener('load', loadModels);
+elements.fileInput.addEventListener('change', handleFileUpload);
+ </script>
+
+
+    <!-- <script>
+      let modelsLoaded = false;
+      const modelStatus = document.getElementById("modelStatus");
+      const uploadButton = document.querySelector(".upload-button");
+
+      // Define model URLs
+      // const MODEL_URL = 'https://raw.githubusercontent.com/vladmandic/face-api/master/model/';
+      const MODEL_URL = "../models/weights";
+      async function loadModels() {
+        try {
+          modelStatus.style.backgroundColor = "#fff3cd";
+          modelStatus.style.color = "#856404";
+          modelStatus.textContent = "Loading models...";
+          uploadButton.disabled = true;
+
+          // Load ONLY the models we need
+          await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+          await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+          await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+
+          await faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL);
+          // console.log(faceapi.nets)
+          modelsLoaded = true;
+          modelStatus.style.backgroundColor = "#d4edda";
+          modelStatus.style.color = "#155724";
+          modelStatus.textContent =
+            "Models loaded successfully! You can now upload an image.";
+          uploadButton.disabled = false;
+
+          console.log("All models loaded successfully");
+        } catch (error) {
+          console.error("Error loading models:", error);
+          modelStatus.style.backgroundColor = "#f8d7da";
+          modelStatus.style.color = "#721c24";
+          modelStatus.textContent =
+            "Error loading models. Please refresh the page.";
+          uploadButton.disabled = true;
+        }
+      }
+
+      async function detectFaces() {
+        if (!modelsLoaded) {
+          alert("Face detection models are still loading. Please wait.");
+          return;
+        }
+
+        const image = document.getElementById("inputImage");
+        const canvas = document.getElementById("overlayCanvas");
+        const loadingIndicator = document.getElementById("loadingIndicator");
+
+        loadingIndicator.style.display = "block";
+
+        try {
+          // Wait for image to load
+          await new Promise((resolve) => {
+            if (image.complete) resolve();
+            else image.onload = resolve;
+          });
+
+          // Get display size
+          const displaySize = {
+            width: image.clientWidth,
+            height: image.clientHeight,
+          };
+
+          // Set canvas size
+          canvas.width = displaySize.width;
+          canvas.height = displaySize.height;
+
+          // Use SSDMobilenetv1 for detection
+          const detections = await faceapi
+            .detectAllFaces(
+              image,
+              new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 })
+            )
+            .withFaceLandmarks()
+            .withFaceExpressions();
+
+          try {
+            const detections2 = await faceapi
+              .detectAllFaces(
+                image,
+                new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 })
+              )
+              .withFaceLandmarks()
+              .withFaceDescriptors();
+
+            // console.log("with descriptor", detections2[0].detection);
+
+            async function fetchdata() {
+              try {
+                const response = await fetch("http://localhost:3000/faces");
+                if (!response.ok) {
+                  throw new Error("Network response was not ok");
+                }
+                const data = await response.json();
+
+                // Loop through detections one by one (Ensures proper async handling)
+                for (const [index, detection] of detections2.entries()) {
+                  let bestMatch = null;
+                  let bestMatchCosine = null;
+                  let minDistance = Infinity;
+                  let minCosine = Infinity;
+                  console.log(detection.descriptor);
+                  for (let i = 0; i < data.length; i++) {
+                    const storedDescriptor = new Float32Array(
+                      Object.values(data[i].descriptor)
+                    );
+                    const distance = await faceapi.euclideanDistance(
+                      detection.descriptor,
+                      storedDescriptor
+                    );
+                    console.log(typeof cosineDistance);
+                    const distanceCosine = cosineDistance(
+                      detection.descriptor,
+                      storedDescriptor
+                    );
+
+                    // console.log(
+                    //   `Distance between ${detection.detection._score} and ${data[i].label}: ${distance}`
+                    // );
+                    // console.log(
+                    //   `cosineDistance between ${detection.detection._score} and ${data[i].label}: ${distanceCosine}`
+                    // );
+                    if (distanceCosine < 0.08 && distanceCosine < minCosine) {
+                      minCosine = distanceCosine;
+                      bestMatchCosine = data[i];
+                    }
+                    if (distance < 0.55 && distance < minDistance) {
+                      minDistance = distance;
+                      bestMatch = data[i]; // Store the best match
+                    }
+                  }
+
+                  // After looping through all database faces, handle the best match
+                  if (bestMatch) {
+                    // console.log(
+                    //   `Best Match: ${bestMatch.label} ${minDistance}`
+                    // );
+                    alert(
+                      `${bestMatch.label} ${minDistance} value: ${detection.detection._score}`
+                    );
+                  } else {
+                    console.log(
+                      `No match for face ${detection.detection._score} - Distance threshold not met`
+                    );
+                    alert(`New User, ${detection.detection._score}`);
+                  }
+
+                  if (bestMatchCosine) {
+                    const resizedDetections = faceapi.resizeResults(
+                      detections,
+                      displaySize
+                    );
+                    
+                    // Clear canvas
+                    const context = canvas.getContext("2d");
+                    // context.clearRect(0, 0, canvas.width, canvas.height);
+                   
+                    const { x, y } = detection.detection.box;
+                    
+                    context.fillText(`Face ${index + 1} `, x, y - 5);
+                    // console.log(
+                    //   `Best Match using cosine: ${bestMatchCosine.label} ${minCosine}`
+                    // );
+                    alert(
+                      ` Cosine : ${bestMatchCosine.label} ${minCosine} value: ${detection.detection._score}`
+                    );
+                  } else {
+                    console.log(
+                      `No match for face Cosine${detection.detection._score} - Distance threshold not met`
+                    );
+                    alert(`Cosine: New User , ${detection.detection._score}`);
+                  }
+                }
+              } catch (error) {
+                console.log(error);
+              }
+            }
+            fetchdata();
+          } catch (error) {
+            console.log(error);
+          }
+
+          console.log("Detections:", detections);
+
+          // Resize detections to match display size
+          const resizedDetections = faceapi.resizeResults(
+            detections,
+            displaySize
+          );
+
+          // Clear canvas
+          const context = canvas.getContext("2d");
+          context.clearRect(0, 0, canvas.width, canvas.height);
+
+          // Draw detections
+          faceapi.draw.drawDetections(canvas, resizedDetections);
+          // faceapi.draw.drawFaceLandmarks(canvas, resizedDetections);
+          // faceapi.draw.drawFaceExpressions(canvas, resizedDetections);
+
+          // Add labels with confidence scores
+          resizedDetections.forEach((detection, index) => {
+            const { x, y } = detection.detection.box;
+            const score = (detection.detection.score * 100).toFixed(1);
+            context.font = "bold 16px Arial";
+            context.fillStyle = "#4CAF50";
+            // context.fllText(`${ name ? bestMatch.label : 'unknown'}`,x, y - 5)
+            // context.fillText(`Face ${index + 1} (${score}%)`, x, y - 5);
+          });
+        } catch (error) {
+          console.error("Error processing image:", error);
+          alert("Error processing image. Please check console for details.");
+        } finally {
+          loadingIndicator.style.display = "none";
+        }
+      }
+
+      // Handle file upload
+      document
+        .getElementById("fileInput")
+        .addEventListener("change", async function (event) {
+          const file = event.target.files[0];
+          if (file) {
+            const reader = new FileReader();
+
+            reader.onload = function (e) {
+              const image = document.getElementById("inputImage");
+              const imageContainer = document.getElementById("imageContainer");
+
+              image.src = e.target.result;
+              imageContainer.style.display = "block";
+
+              image.onload = async function () {
+                await detectFaces();
+              };
+            };
+
+            reader.readAsDataURL(file);
+          }
+        });
+
+      // Load models when page loads
+      window.onload = async () => {
+        await loadModels();
+      };
+    </script> -->
+  </body>
+</html>
